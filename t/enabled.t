@@ -68,3 +68,30 @@ GET /t
 X-Forwarded-For: not an IP address
 --- error_code: 400
 
+=== TEST 6: Module enabled, XFF provided, IPv6 address
+--- config
+location = /t {
+  address_parser on;
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 2001:0db8:3c4d:0015:0000:0000:1a2f:1a2b
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2001:0db8:3c4d:0015:0000:0000:1a2f:1a2b
+
+=== TEST 7: Module enabled, XFF provided, IPv6 abbreviated address
+--- config
+location = /t {
+  address_parser on;
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 2001:db8:3c4d:15::1a2f:1a2b
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2001:db8:3c4d:15::1a2f:1a2b

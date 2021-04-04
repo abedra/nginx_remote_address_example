@@ -255,7 +255,38 @@ if (inet_pton(AF_INET,  (const char *)&terminated_comparator, ipv4) == 1 ||
 }
 ```
 
-One of the downsides to using the NGINX api is that the string type used, `ngx_str_t` is a struct whos `data` member is a non null terminated `u_char *`. If you want to use an `ngx_str_t` with traditional C library functions, you need to either null terminate your `ngx_str_t` values up front and deal with the extra character, or find a way to provide null terminated versions of the value. In this case I chose to keep the address non null terminated to avoid any consumer issues outside of the address validation and create a temporary terminated string for the `inet_pton` call. Since we have no way of knowing if the `X-Forwarded-For` header will pass in IPv4 or IPv6 addresses, we need to consider both. The good news is that a call to `inet_pton` can give you the validation necessary to understand if you have a proper IP address. With this code in hand our newest test now passes.
+One of the downsides to using the NGINX api is that the string type used, `ngx_str_t` is a struct whos `data` member is a non null terminated `u_char *`. If you want to use an `ngx_str_t` with traditional C library functions, you need to either null terminate your `ngx_str_t` values up front and deal with the extra character, or find a way to provide null terminated versions of the value. In this case I chose to keep the address non null terminated to avoid any consumer issues outside of the address validation and create a temporary terminated string for the `inet_pton` call. Since we have no way of knowing if the `X-Forwarded-For` header will pass in IPv4 or IPv6 addresses, we need to consider both. The good news is that a call to `inet_pton` can give you the validation necessary to understand if you have a proper IP address. With this code in hand our newest test now passes. Since we haven't yet considered IPv6 addresses, let's add tests for both full and abbreviated forms:
+
+```fundamental
+=== TEST 6: Module enabled, XFF provided, IPv6 address
+--- config
+location = /t {
+  address_parser on;
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 2001:0db8:3c4d:0015:0000:0000:1a2f:1a2b
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2001:0db8:3c4d:0015:0000:0000:1a2f:1a2b
+
+=== TEST 7: Module enabled, XFF provided, IPv6 abbreviated address
+--- config
+location = /t {
+  address_parser on;
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 2001:db8:3c4d:15::1a2f:1a2b
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2001:db8:3c4d:15::1a2f:1a2b
+
+```
 
 ## Using a Custom Header
 
