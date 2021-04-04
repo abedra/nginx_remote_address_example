@@ -8,14 +8,6 @@
 
 ngx_module_t ngx_http_address_parser_module;
 
-static address_status remote_address(ngx_http_request_t *r, ngx_str_t *address) {
-  address->len = r->connection->addr_text.len;
-  address->data = ngx_pnalloc(r->pool, address->len);
-  ngx_memcpy(address->data, r->connection->addr_text.data, r->connection->addr_text.len); 
-
-  return ADDRESS_OK;
-}
-
 static void set_derived_address_header(ngx_http_request_t *r, ngx_str_t *address) {
   ngx_table_elt_t *h;
   h = ngx_list_push(&r->headers_out.headers);
@@ -35,13 +27,31 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
     return NGX_DECLINED;
   }
 
-  ngx_str_t address = ngx_null_string;
-  address_status address_parser_result = remote_address(r, &address);
-  if (address_parser_result != ADDRESS_OK) {
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Invalid Address");
-  } else {
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Address: %V", &address);
+  ngx_array_t *xff_header_array = &r->headers_in.x_forwarded_for;
+  if (xff_header_array != NULL && xff_header_array->nelts == 1) {
+    ngx_table_elt_t **xff_elements = xff_header_array->elts;
+    ngx_str_t xff = xff_elements[0]->value;
+
+    if (xff.len == 0) {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "X-Forwarded-For present but no value provided");
+      return NGX_HTTP_BAD_REQUEST;
+    }
+
+    ngx_str_t address = ngx_null_string;
+    u_char *p;
+    for (p = xff.data; p < (xff.data + xff.len); p++) {
+      if (*p == ' ' || *p == ',') {
+        break;
+      }
+    }
+    
+    address.len = p - xff.data;
+    address.data = ngx_pnalloc(r->pool, address.len);
+    ngx_memcpy(address.data, xff.data, address.len);
+
     set_derived_address_header(r, &address);
+  } else {
+    set_derived_address_header(r, &r->connection->addr_text);
   }
 
   return NGX_OK;
