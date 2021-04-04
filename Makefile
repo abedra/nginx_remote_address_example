@@ -1,8 +1,8 @@
 export PATH := $(shell pwd)/build/nginx/sbin:$(PATH)
 
-.PHONY: test
+default: compile
+
 test:
-	redis-cli flushdb
 	prove t/*.t
 
 compile:
@@ -23,4 +23,4 @@ stop:
 reload:
 	build/nginx/sbin/nginx -s reload
 
-.PHONY: clean start stop reload
+.PHONY: clean start stop reload test
