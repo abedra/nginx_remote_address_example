@@ -49,7 +49,17 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
     address.data = ngx_pnalloc(r->pool, address.len);
     ngx_memcpy(address.data, xff.data, address.len);
 
-    set_derived_address_header(r, &address);
+    char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
+    memcpy(terminated_comparator, address.data, address.len);
+    unsigned char ipv4[sizeof(struct in_addr)];
+    unsigned char ipv6[sizeof(struct in6_addr)];
+
+    if (inet_pton(AF_INET, (const char *)&terminated_comparator, ipv4) == 1 || inet_pton(AF_INET6, (const char *)&terminated_comparator, ipv6) == 1) {
+      set_derived_address_header(r, &address);
+    } else {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%V is not a valid IP address", &address);
+      return NGX_HTTP_BAD_REQUEST;
+    }
   } else {
     set_derived_address_header(r, &r->connection->addr_text);
   }

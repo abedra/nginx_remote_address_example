@@ -240,6 +240,23 @@ X-Forwarded-For: not an IP address
 
 Currently, this will fail with a response code of `200`, and set the value of the `X-Derived-Address` to `not`. That's less than desirable, so let's put something in place to halt the request and return a `400` if the extracted value is not a valid IP address.
 
+```c
+char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
+memcpy(terminated_comparator, address.data, address.len);
+unsigned char ipv4[sizeof(struct in_addr)];
+unsigned char ipv6[sizeof(struct in6_addr)];
+
+if (inet_pton(AF_INET,  (const char *)&terminated_comparator, ipv4) == 1 || 
+    inet_pton(AF_INET6, (const char *)&terminated_comparator, ipv6) == 1) {
+  set_derived_address_header(r, &address);
+} else {
+  ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%V is not a valid IP address", &address);
+  return NGX_HTTP_BAD_REQUEST;
+}
+```
+
+One of the downsides to using the NGINX api is that the string type used, `ngx_str_t` is a struct whos `data` member is a non null terminated `u_char *`. If you want to use an `ngx_str_t` with traditional C library functions, you need to either null terminate your `ngx_str_t` values up front and deal with the extra character, or find a way to provide null terminated versions of the value. In this case I chose to keep the address non null terminated to avoid any consumer issues outside of the address validation and create a temporary terminated string for the `inet_pton` call. Since we have no way of knowing if the `X-Forwarded-For` header will pass in IPv4 or IPv6 addresses, we need to consider both. The good news is that a call to `inet_pton` can give you the validation necessary to understand if you have a proper IP address. With this code in hand our newest test now passes.
+
 ## Using a Custom Header
 
 ## Security Considerations
