@@ -290,6 +290,167 @@ X-Derived-Address: 2001:db8:3c4d:15::1a2f:1a2b
 
 ## Using a Custom Header
 
+The last item on our list of options is using a custom header to derive the address. Most CDN providers have the option to enable a header that they are responsible for maintaining. Since they use a custom header, they are free from any rules around the handling of that header and can choose options like overwritting the header regardless of input conditions, which is one of the major reasons trusting the `X-Forwarded-For` header is a dangerous choice if you truly need to determine the connecting IP address.
+
+In order to facilitate usage of a custom header, we will need to tell our module what header to look for in the incomming requests. This means we will need to add one more directive and corresponding configuration value. Let's start by adding a member to the module's configuration struct:
+
+```c
+typedef struct {
+  ngx_flag_t enabled;
+  ngx_str_t header;
+} ngx_http_address_parser_module_loc_conf_t;
+```
+
+This provides us a place to put the configuration value. In order to capture it, we need to add a directive to the module. The resulting directives list is as follows:
+
+```c
+static ngx_command_t ngx_http_address_parser_module_commands[] = {
+  {
+    ngx_string("address_parser"),
+    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_flag_slot,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_address_parser_module_loc_conf_t, enabled),
+    NULL
+  },
+  {
+    ngx_string("address_parser_custom_header"),
+    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_str_slot,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_address_parser_module_loc_conf_t, header),
+    NULL
+  },
+  ngx_null_command
+};
+```
+
+We will also need to handle merging any configuration changes. Because we allow these directives to be set at any level, it's important to properly merge them in. Our merge function will get one additional line to accomodate:
+
+```c
+static char* ngx_http_address_parser_module_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
+  ngx_http_address_parser_module_loc_conf_t *prev = (ngx_http_address_parser_module_loc_conf_t *) parent;
+  ngx_http_address_parser_module_loc_conf_t *conf = (ngx_http_address_parser_module_loc_conf_t *) child;
+
+  ngx_conf_merge_value(conf->enabled,    prev->enabled, 0);
+  ngx_conf_merge_str_value(conf->header, prev->header,  "");
+
+  return NGX_CONF_OK;
+}
+```
+
+With this we have enough to write the next failing test:
+
+```fundamental
+=== TEST 8: Module enabled, custom header configured, custom header provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Parser-Test-IP: 1.1.1.1
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 1.1.1.1
+
+```
+
+Since we don't look for the configured custom header, we can't expect this to pass yet. Doing so requires a little more code than any of our previous endeavors. While all headers are accounted for in the request struct, only the headers defined by the HTTP spec are available by name. All other headers need to be resolved by looking them up in the request hash. To do this we will need to iterate over the incoming headers and check for a match. We can insert the following code above the rest of our processing logic in the handler, as it will take priority over the other options:
+
+```c
+ngx_list_part_t *headers_list = &r->headers_in.headers.part;
+ngx_table_elt_t *headers = headers_list->elts;
+ngx_table_elt_t *custom_address_header = NULL;
+for (ngx_uint_t i = 0; ; i++) {
+  if (i >= headers_list->nelts) {
+    if (headers_list->next == NULL) {
+      break;
+    }
+
+    headers_list = headers_list->next;
+    headers = headers_list->elts;
+    i = 0;
+  }
+
+  if (ngx_strncmp(headers[i].key.data, loc_conf->header.data, headers[i].key.len) == 0) {
+    custom_address_header = &headers[i];
+  }
+}
+
+if (custom_address_header != NULL) {
+  set_derived_address_header(r, &custom_address_header->value);
+  return NGX_OK;
+}
+```
+
+This brute force search is expensive, but not horribly so. We could optimize it by hashing the header name provided and comparing the hashed values instead of the header name strings, but for the sake of this conversation this is sufficient to get us to our desired end state. If the header is found in the request, set the `X-Derived-Address` header to its value. This assumes that the value in the custom header will only ever be a single value. If your custom header is a collection of addresses, you will need to adjust accordingly. Our newest test will now pass, but there are several more tests to write that will prove the existence of a few bugs. First, let's test the condition that the directive is configured but no header is provided:
+
+```fundamental
+=== TEST 9: Module enabled, custom header configured, custom header not provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- error_code: 400
+
+```
+
+This test will fail because we continue to fall through if the header is not found. This will result in a `200` response code and the derived address equal to the value of the connected socket address. We can quickly fix this by adding a branch to our presence check on the value of `custom_address_header`, but we will quickly realize that all of this code should only be run under the condition that the `address_parser_custom_header` directive is actually configured. We can fix that by adding `if (loc_conf->header.len > 0) {` around the code above. With the custom header conditionally handled we can safely fail to `400` if it's configured and not found.
+
+```c
+if (custom_address_header != NULL) {
+  set_derived_address_header(r, &custom_address_header->value);
+  return NGX_OK;
+} else {
+  ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Header %V not present in request", &loc_conf->header);
+  return NGX_HTTP_BAD_REQUEST;
+}
+```
+
+This will let the absence test pass, but if you've been following along closely enough you will realize that we aren't yet validating the address provided. Let's write a test that demonstrates the issue:
+
+```fundamental
+=== TEST 10: Module enabled, custom header configured, custom header address not valid
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Parser-Test-IP: not an IP address
+--- error_code: 400
+
+```
+
+So far there's been a general resistence to refactoring and almost all of the handler code is in the same function. Because the validation will be the same for all cases, let's extract it:
+
+```c
+static address_status validate_address(ngx_str_t *address) {
+  char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
+  memcpy(terminated_comparator, address->data, address->len);
+  unsigned char ipv4[sizeof(struct in_addr)];
+  unsigned char ipv6[sizeof(struct in6_addr)];
+
+  if (inet_pton(AF_INET, (const char *)&terminated_comparator, ipv4) == 1 || 
+      inet_pton(AF_INET6, (const char *)&terminated_comparator, ipv6) == 1) {
+    return ADDRESS_OK;
+  } else {
+    return ADDRESS_INVALID;
+  }
+}
+```
+
 ## Security Considerations
 
 ## Real World Usage

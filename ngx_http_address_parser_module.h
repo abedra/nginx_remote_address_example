@@ -10,6 +10,7 @@ typedef enum {
 
 typedef struct {
   ngx_flag_t enabled;
+  ngx_str_t header;
 } ngx_http_address_parser_module_loc_conf_t;
 
 #endif

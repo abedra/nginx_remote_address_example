@@ -16,6 +16,19 @@ static void set_derived_address_header(ngx_http_request_t *r, ngx_str_t *address
   h->value = *address;
 }
 
+static address_status validate_address(ngx_str_t *address) {
+  char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
+  memcpy(terminated_comparator, address->data, address->len);
+  unsigned char ipv4[sizeof(struct in_addr)];
+  unsigned char ipv6[sizeof(struct in6_addr)];
+
+  if (inet_pton(AF_INET, (const char *)&terminated_comparator, ipv4) == 1 || inet_pton(AF_INET6, (const char *)&terminated_comparator, ipv6) == 1) {
+    return ADDRESS_OK;
+  } else {
+    return ADDRESS_INVALID;
+  }
+}
+
 static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
   if (r->main->internal) {
     return NGX_DECLINED;
@@ -25,6 +38,40 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
 
   if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
     return NGX_DECLINED;
+  }
+
+  if (loc_conf->header.len > 0) {
+    ngx_list_part_t *headers_list = &r->headers_in.headers.part;
+    ngx_table_elt_t *headers = headers_list->elts;
+    ngx_table_elt_t *custom_address_header = NULL;
+    for (ngx_uint_t i = 0; ; i++) {
+      if (i >= headers_list->nelts) {
+        if (headers_list->next == NULL) {
+          break;
+        }
+  
+        headers_list = headers_list->next;
+        headers = headers_list->elts;
+        i = 0;
+      }
+  
+      if (ngx_strncmp(headers[i].key.data, loc_conf->header.data, headers[i].key.len) == 0) {
+        custom_address_header = &headers[i];
+      }
+    }
+  
+    if (custom_address_header != NULL) {
+      if (validate_address(&custom_address_header->value) == ADDRESS_OK) {
+        set_derived_address_header(r, &custom_address_header->value);
+        return NGX_OK;
+      } else {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Address provided from %V is not a valid IP address", &loc_conf->header);
+        return NGX_HTTP_BAD_REQUEST;
+      }
+    } else {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Header %V not present in request", &loc_conf->header);
+      return NGX_HTTP_BAD_REQUEST;
+    }
   }
 
   ngx_array_t *xff_header_array = &r->headers_in.x_forwarded_for;
@@ -49,22 +96,17 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
     address.data = ngx_pnalloc(r->pool, address.len);
     ngx_memcpy(address.data, xff.data, address.len);
 
-    char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
-    memcpy(terminated_comparator, address.data, address.len);
-    unsigned char ipv4[sizeof(struct in_addr)];
-    unsigned char ipv6[sizeof(struct in6_addr)];
-
-    if (inet_pton(AF_INET, (const char *)&terminated_comparator, ipv4) == 1 || inet_pton(AF_INET6, (const char *)&terminated_comparator, ipv6) == 1) {
+    if (validate_address(&address) == ADDRESS_OK) {
       set_derived_address_header(r, &address);
+      return NGX_OK;
     } else {
       ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%V is not a valid IP address", &address);
       return NGX_HTTP_BAD_REQUEST;
     }
   } else {
     set_derived_address_header(r, &r->connection->addr_text);
+    return NGX_OK;
   }
-
-  return NGX_OK;
 }
 
 static ngx_int_t ngx_http_address_parser_module_init(ngx_conf_t *cf) {
@@ -92,6 +134,14 @@ static ngx_command_t ngx_http_address_parser_module_commands[] = {
     offsetof(ngx_http_address_parser_module_loc_conf_t, enabled),
     NULL
   },
+  {
+    ngx_string("address_parser_custom_header"),
+    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_str_slot,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_address_parser_module_loc_conf_t, header),
+    NULL
+  },
   ngx_null_command
 };
 
@@ -112,7 +162,8 @@ static char* ngx_http_address_parser_module_merge_loc_conf(ngx_conf_t *cf, void 
   ngx_http_address_parser_module_loc_conf_t *prev = (ngx_http_address_parser_module_loc_conf_t *) parent;
   ngx_http_address_parser_module_loc_conf_t *conf = (ngx_http_address_parser_module_loc_conf_t *) child;
 
-  ngx_conf_merge_value(conf->enabled, prev->enabled, 0);
+  ngx_conf_merge_value(conf->enabled,    prev->enabled, 0);
+  ngx_conf_merge_str_value(conf->header, prev->header,  "");
 
   return NGX_CONF_OK;
 }

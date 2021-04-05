@@ -95,3 +95,42 @@ X-Forwarded-For: 2001:db8:3c4d:15::1a2f:1a2b
 --- error_code: 200
 --- response_headers
 X-Derived-Address: 2001:db8:3c4d:15::1a2f:1a2b
+
+=== TEST 8: Module enabled, custom header configured, custom header provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Parser-Test-IP: 1.1.1.1
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 1.1.1.1
+
+=== TEST 9: Module enabled, custom header configured, custom header not provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- error_code: 400
+
+=== TEST 10: Module enabled, custom header configured, custom header address not valid
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Parser-Test-IP: not an IP address
+--- error_code: 400
