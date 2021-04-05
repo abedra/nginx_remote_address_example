@@ -134,3 +134,19 @@ GET /t
 --- more_headers
 X-Parser-Test-IP: not an IP address
 --- error_code: 400
+
+=== TEST 11: Module enabled, custom header configured, XFF and custom header provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 1.1.1.1
+X-Parser-Test-IP: 2.2.2.2
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2.2.2.2

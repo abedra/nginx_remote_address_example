@@ -451,6 +451,64 @@ static address_status validate_address(ngx_str_t *address) {
 }
 ```
 
+We can now use this in both places where valiation is necessary. Next, we should be sure to test behavior when both `X-Forwarded-For` and our configured header are supplied:
+
+```fundamental
+=== TEST 11: Module enabled, custom header configured, XFF and custom header provided
+--- config
+location = /t {
+  address_parser on;
+  address_parser_custom_header "X-Parser-Test-IP";
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 1.1.1.1
+X-Parser-Test-IP: 2.2.2.2
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 2.2.2.2
+
+```
+
+This captures our preference over the `X-Forwarded-For` header.
+
+## Cleanup
+
+At this point there's a lot going on in the main handler. I tend to try to keep that as slim as possible. A little time with the handler can produce the following:
+
+```c
+static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
+  if (r->main->internal) {
+    return NGX_DECLINED;
+  }
+
+  ngx_http_address_parser_module_loc_conf_t *loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_address_parser_module);
+
+  if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
+    return NGX_DECLINED;
+  }
+
+  ngx_str_t address = ngx_null_string;
+  address_status status = derive_address(r, loc_conf, &address);
+  switch (status) {
+    case ADDRESS_OK:
+      set_derived_address_header(r, &address);
+      return NGX_OK;
+    case ADDRESS_UNKNOWN:
+      set_derived_address_header(r, &r->connection->addr_text);
+      return NGX_OK;
+    case ADDRESS_INVALID:
+      return NGX_HTTP_BAD_REQUEST;
+    default:
+      return NGX_OK;
+  }
+}
+```
+
+The rest of the refactoring is cut from this post for the sake of brevity, but it can be viewed in full [here](https://github.com/abedra/nginx_remote_address_example/blob/master/ngx_http_address_parser_module.c). At this point our full set of tests still pass. Before we consider additional tests and features, we need to talk security.
+
 ## Security Considerations
 
 ## Real World Usage

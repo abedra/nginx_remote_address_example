@@ -5,7 +5,8 @@
 
 typedef enum {
   ADDRESS_OK,
-  ADDRESS_INVALID
+  ADDRESS_INVALID,
+  ADDRESS_UNKNOWN
 } address_status;
 
 typedef struct {

@@ -29,6 +29,75 @@ static address_status validate_address(ngx_str_t *address) {
   }
 }
 
+static address_status extract_custom_header(ngx_http_request_t *r, ngx_str_t *custom_header, ngx_str_t *address) {
+  ngx_list_part_t *headers_list = &r->headers_in.headers.part;
+  ngx_table_elt_t *headers = headers_list->elts;
+  for (ngx_uint_t i = 0; ; i++) {
+    if (i >= headers_list->nelts) {
+      if (headers_list->next == NULL) {
+        break;
+      }  
+      headers_list = headers_list->next;
+      headers = headers_list->elts;
+      i = 0;
+    }  
+
+    if (ngx_strncmp(headers[i].key.data, custom_header->data, headers[i].key.len) == 0) {
+      if (validate_address(&headers[i].value) == ADDRESS_OK) {
+        address->len = headers[i].value.len;
+        address->data = ngx_pnalloc(r->pool, address->len);
+        ngx_memcpy(address->data, headers[i].value.data, address->len);
+        return ADDRESS_OK;
+      } else {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Address provided from %V is not a valid IP address", custom_header);
+        return ADDRESS_INVALID;
+      }
+    }
+  }
+
+  ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Header %V not present in request", custom_header);
+  return ADDRESS_INVALID;
+}
+
+static address_status extract_xff(ngx_http_request_t *r, ngx_str_t *address) {
+  ngx_array_t *xff_header_array = &r->headers_in.x_forwarded_for;
+  if (xff_header_array != NULL && xff_header_array->nelts == 1) {
+    ngx_table_elt_t **xff_elements = xff_header_array->elts;
+    ngx_str_t xff = xff_elements[0]->value;
+
+    if (xff.len == 0) {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "X-Forwarded-For present but no value provided");
+      return ADDRESS_INVALID;
+    }
+
+    u_char *p;
+    for (p = xff.data; p < (xff.data + xff.len); p++) {
+      if (*p == ' ' || *p == ',') {
+        break;
+      }
+    }
+    
+    address->len = p - xff.data;
+    address->data = ngx_pnalloc(r->pool, address->len);
+    ngx_memcpy(address->data, xff.data, address->len);
+
+    if (validate_address(address) == ADDRESS_OK) {
+      return ADDRESS_OK;
+    } else {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%V is not a valid IP address", address);
+      return ADDRESS_INVALID;
+    }
+  } else {
+    return ADDRESS_UNKNOWN;
+  }
+}
+
+static address_status derive_address(ngx_http_request_t *r, ngx_http_address_parser_module_loc_conf_t *loc_conf, ngx_str_t *address) {
+  return loc_conf->header.len > 0
+    ? extract_custom_header(r, &loc_conf->header, address)
+    : extract_xff(r, address);
+}
+
 static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
   if (r->main->internal) {
     return NGX_DECLINED;
@@ -40,72 +109,19 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
     return NGX_DECLINED;
   }
 
-  if (loc_conf->header.len > 0) {
-    ngx_list_part_t *headers_list = &r->headers_in.headers.part;
-    ngx_table_elt_t *headers = headers_list->elts;
-    ngx_table_elt_t *custom_address_header = NULL;
-    for (ngx_uint_t i = 0; ; i++) {
-      if (i >= headers_list->nelts) {
-        if (headers_list->next == NULL) {
-          break;
-        }
-  
-        headers_list = headers_list->next;
-        headers = headers_list->elts;
-        i = 0;
-      }
-  
-      if (ngx_strncmp(headers[i].key.data, loc_conf->header.data, headers[i].key.len) == 0) {
-        custom_address_header = &headers[i];
-      }
-    }
-  
-    if (custom_address_header != NULL) {
-      if (validate_address(&custom_address_header->value) == ADDRESS_OK) {
-        set_derived_address_header(r, &custom_address_header->value);
-        return NGX_OK;
-      } else {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Address provided from %V is not a valid IP address", &loc_conf->header);
-        return NGX_HTTP_BAD_REQUEST;
-      }
-    } else {
-      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Header %V not present in request", &loc_conf->header);
-      return NGX_HTTP_BAD_REQUEST;
-    }
-  }
-
-  ngx_array_t *xff_header_array = &r->headers_in.x_forwarded_for;
-  if (xff_header_array != NULL && xff_header_array->nelts == 1) {
-    ngx_table_elt_t **xff_elements = xff_header_array->elts;
-    ngx_str_t xff = xff_elements[0]->value;
-
-    if (xff.len == 0) {
-      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "X-Forwarded-For present but no value provided");
-      return NGX_HTTP_BAD_REQUEST;
-    }
-
-    ngx_str_t address = ngx_null_string;
-    u_char *p;
-    for (p = xff.data; p < (xff.data + xff.len); p++) {
-      if (*p == ' ' || *p == ',') {
-        break;
-      }
-    }
-    
-    address.len = p - xff.data;
-    address.data = ngx_pnalloc(r->pool, address.len);
-    ngx_memcpy(address.data, xff.data, address.len);
-
-    if (validate_address(&address) == ADDRESS_OK) {
+  ngx_str_t address = ngx_null_string;
+  address_status status = derive_address(r, loc_conf, &address);
+  switch (status) {
+    case ADDRESS_OK:
       set_derived_address_header(r, &address);
       return NGX_OK;
-    } else {
-      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%V is not a valid IP address", &address);
+    case ADDRESS_UNKNOWN:
+      set_derived_address_header(r, &r->connection->addr_text);
+      return NGX_OK;
+    case ADDRESS_INVALID:
       return NGX_HTTP_BAD_REQUEST;
-    }
-  } else {
-    set_derived_address_header(r, &r->connection->addr_text);
-    return NGX_OK;
+    default:
+      return NGX_OK;
   }
 }
 
