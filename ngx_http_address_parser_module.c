@@ -159,7 +159,7 @@ static char* ngx_http_address_parser_module_merge_loc_conf(ngx_conf_t *cf, void 
   return NGX_CONF_OK;
 }
 
-static ngx_int_t derived_address_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
+static ngx_int_t get_derived_address(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
   ngx_http_address_parser_module_loc_conf_t *loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_address_parser_module);
 
   if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
@@ -190,7 +190,7 @@ static ngx_int_t ngx_http_address_parser_module_add_variables(ngx_conf_t *cf) {
     return NGX_ERROR;
   }
   
-  var->get_handler = derived_address_variable;
+  var->get_handler = get_derived_address;
   var->data = 0;
 
   return NGX_OK;

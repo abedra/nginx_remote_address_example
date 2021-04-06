@@ -2,10 +2,11 @@
 
 ## Introduction
 
-Almost anything worth deploying in production will be deployed in layers with multiple proxies. This can make understanding the IP address of the actual requester difficult.
+When it comes to web applications, almost anything worth deploying in production will be deployed in layers with multiple proxies. This can make understanding the IP address of the actual requester difficult. A basic understanding of who is connecting to you is a valuable asset in managing traffic and making the most efficient use of your assets. I came across [a post](https://jychp.medium.com/how-to-bypass-cloudflare-bot-protection-1f2c6c0c36fb) recently that claimed to bypass CloudFlare's ability to identify an actor. The response provided by CloudFlare was spot on, but there wasn't a follow on explanation by the author of why the `X-Forwarded-For` header should not be trusted as a mechanism for providing this information to a web application.
 
+Rather than just point to [RFC 7239](https://tools.ietf.org/html/rfc7239) and talk through the right way to derive an address, I thought it would be fun to write this from scratch in a generic way. This post will implement a custom NGINX module in C that provides several ways of discovering the IP of the actor and explain the various scenarios that one should consider when determining if you can trust the information.
 
-https://jychp.medium.com/how-to-bypass-cloudflare-bot-protection-1f2c6c0c36fb
+You can find the complete implementation [here](https://github.com/abedra/nginx_remote_address_example).
 
 ## Project Setup
 
@@ -511,6 +512,126 @@ The rest of the refactoring is cut from this post for the sake of brevity, but i
 
 ## Security Considerations
 
+Determining the real IP address of a connecting party can be unreliable at best when multiple proxies are involved. There are only a few ways to get this information in what can be considered a best effort or "probably accurate" fashion. In order to rely on this data it's important to know what can and cannot be modified by the requester, and set your expectations accordingly. It's good to lean on CDN providers to source this information as they have some of the best infrastructure in which to provide the data. IP spoofing is mostly a thing of the past, but hopping mechanisms like tor are still alive and well, and should be accounted for. There are some ways to identify tor exit nodes and restrict traffic from those addresses, but it's a constantly evolving game that you should only pursue if you have the real means to do so. This comes in both money and time, and takes a village to get right.
+
+At the end of the day it's good to create controls that act on IP addresses. You will undoubtedly cause a little unintended consequences, but you shouldn't let that discourage you from pursing this as a means to control traffic.
+
 ## Real World Usage
 
+As previously stated, adding the derived address back to the outbound response headers is fairly useless and likely does more harm than good. It was done initially to support the tests used to drive this process. The good news is that we can have our cake and eat it to. NGINX offers an API to create variables that can be used outside of the module. With a little more code we can set the variable to the derived address and allow the consumer of the module to use that variable at their discretion. This means we can use the variable to set an outbound header inside our tests and maintain our setup and expectations with slight tweaks to the individual test configurations without any loss in fidelity. Let's start by adding a function to inject variables into the module:
+
+```c
+// Somewhere near the top of the file
+ngx_str_t derived_address_variable_name = ngx_string("derived_address");
+
+// ...
+static ngx_int_t ngx_http_address_parser_module_add_variables(ngx_conf_t *cf) {
+  ngx_http_variable_t *var = ngx_http_add_variable(cf, &derived_address_variable_name, NGX_HTTP_VAR_NOCACHEABLE);
+  
+  if (var == NULL) {
+    return NGX_ERROR;
+  }
+  
+  var->get_handler = get_derived_address;
+  var->data = 0;
+
+  return NGX_OK;
+}
+```
+
+This function will add a single variable named `derived_address`, available to any configuration where the module is loaded. a function named `get_derived_address` is assigned to the `get_handler` member of our variable. Let's define that now:
+
+```c
+static ngx_int_t get_derived_address(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
+  ngx_http_address_parser_module_loc_conf_t *loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_address_parser_module);
+
+  if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
+    return NGX_OK;
+  }
+
+  ngx_str_t address = ngx_null_string;
+  address_status status = derive_address(r, loc_conf, &address);
+  switch (status) {
+    case ADDRESS_OK:
+      v->len = address.len;
+      v->valid = 1;
+      v->no_cacheable = 0;
+      v->not_found = 0;
+      v->data = address.data;
+      return NGX_OK;
+    case ADDRESS_UNKNOWN:
+    case ADDRESS_INVALID:
+    default:
+      return NGX_OK;
+  }
+}
+```
+
+This should look strikingly similar to the module handler. That's because this code will now supplant our handler and be the only real code run on a request. Our goal as a module will shift from controlling the request directly to making a variable available that can be evaluated and operated on within the NGINX configuration itself, leaving ultimate control to the consumer of the module. I find that relinquishing control from the module back to the configuration as cleanly and quickly as possible is a good practice. You should also notice that there's only one case that results in the variable being populated. The rest fall through to returning `NGX_OK` without setting any data. The behavior change that this will produce is in the case of nothing found nothing will happen and it will be up to the configuration to decide if adding a header with the connected socket address is appropriate given the current context.
+
+There's one more place to reference our new code to make sure the module executes it. We need to update module context:
+
+```c
+static ngx_http_module_t ngx_http_address_parser_module_ctx = {
+  ngx_http_address_parser_module_add_variables,   /* preconfiguration */
+  ngx_http_address_parser_module_init,            /* postconfiguration */
+  NULL,                                           /* create main configuration */
+  NULL,                                           /* init main configuration */
+  NULL,                                           /* create server configuration */
+  NULL,                                           /* merge server configuration */
+  ngx_http_address_parser_module_create_loc_conf, /* create location configuration */
+  ngx_http_address_parser_module_merge_loc_conf   /* merge location configuration */
+};
+
+Note the addition of our new function into the `preconfiguration` section of the module context. This is all that is necessary to make our variable available. In order to prevent the module from acting on the request and adding a header to the response, we need to cull the original code from the module handler:
+
+```c
+static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
+  if (r->main->internal) {
+    return NGX_DECLINED;
+  }
+
+  return NGX_OK;
+}
+```
+
+Nothing left to speak of here. There are a couple additional tricks we could do to completely remove this handler from the equation, but this is good enough for now. When you compile and run your tests you will be greeted with a large series of failures. This is because we aren't explicitly setting the header, nor are we returning 400 if it's not able to derive the address. I won't list out every single test change here. If you want to see the complete set you can find them [here](https://github.com/abedra/nginx_remote_address_example/blob/master/t/enabled.t). To add the header we will use the following configuration:
+
+```fundamental
+add_header X-Derived-Address $derived_address;
+```
+
+To return a 400 if the header is not set:
+
+```fundamental
+if ($derived_address = '') {
+  return 400;
+}
+```
+
+A complete updated test looks like:
+
+```fundamental
+=== TEST 2: Module enabled, XFF provided, one address
+--- config
+location = /t {
+  address_parser on;
+  add_header X-Derived-Address $derived_address;
+  echo 'test';
+}
+--- request
+GET /t
+--- more_headers
+X-Forwarded-For: 1.1.1.1
+--- error_code: 200
+--- response_headers
+X-Derived-Address: 1.1.1.1
+```
+
+A quick update to all of our tests shows the module still provides the necessary information without injecting any opinion on what should happen to the request as a result and more closely represents how a real world provider of this type of information should behave.
+
 ## Wrap-Up
+
+While this post aimed to explain how to properly derive the IP address of a requster from the perspective of an HTTP server, it was also a complete example of how to write a custom NGINX module in C from scratch, as well as how to test drive it and really, all of your NGINX configurations. I feel that when it comes to discussing edge proxy behavior that the idea of stability and performance must be backed up at all times. Using the NGINX API and underlying server is a great foundation, and writing the module in C provides the ability to do so in the fastest way possible with the given tools.
+
+You might still be wondering what else you could do with a tool like this other than basic load shedding. There are myriad options available once an actor has been identified including geoip restriction, consistent hash load balancing, and many others. I hope you have a new found appreciation for the detail that and weight that such a seemingly simple problem carries when introduced to the complexity of modern web application infrastructure.
