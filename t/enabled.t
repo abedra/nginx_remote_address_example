@@ -14,12 +14,13 @@ location = /t {
 GET /t
 --- error_code: 200
 --- response_headers
-X-Derived-Address: 127.0.0.1
+!X-Derived-Address
 
 === TEST 2: Module enabled, XFF provided, one address
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -34,6 +35,7 @@ X-Derived-Address: 1.1.1.1
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -48,6 +50,10 @@ X-Derived-Address: 1.1.1.1
 --- config
 location = /t {
   address_parser on;
+  if ($derived_address = '') {
+    return 400;
+  }
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -55,11 +61,17 @@ GET /t
 --- more_headers
 X-Forwarded-For:
 --- error_code: 400
+--- response_headers
+!X-Derived-Address
 
 === TEST 5: Module enabled, XFF provided, invalid address
 --- config
 location = /t {
   address_parser on;
+  if ($derived_address = '') {
+    return 400;
+  }
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -67,11 +79,14 @@ GET /t
 --- more_headers
 X-Forwarded-For: not an IP address
 --- error_code: 400
+--- response_headers
+!X-Derived-Address
 
 === TEST 6: Module enabled, XFF provided, IPv6 address
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -86,6 +101,7 @@ X-Derived-Address: 2001:0db8:3c4d:0015:0000:0000:1a2f:1a2b
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -100,6 +116,7 @@ X-Derived-Address: 2001:db8:3c4d:15::1a2f:1a2b
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   address_parser_custom_header "X-Parser-Test-IP";
   echo 'test';
 }
@@ -116,17 +133,27 @@ X-Derived-Address: 1.1.1.1
 location = /t {
   address_parser on;
   address_parser_custom_header "X-Parser-Test-IP";
+  if ($derived_address = '') {
+    return 400;
+  }
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
 GET /t
 --- error_code: 400
+--- response_headers
+!X-Derived-Address
 
 === TEST 10: Module enabled, custom header configured, custom header address not valid
 --- config
 location = /t {
   address_parser on;
   address_parser_custom_header "X-Parser-Test-IP";
+  if ($derived_address = '') {
+    return 400;
+  }
+  add_header X-Derived-Address $derived_address;
   echo 'test';
 }
 --- request
@@ -134,11 +161,14 @@ GET /t
 --- more_headers
 X-Parser-Test-IP: not an IP address
 --- error_code: 400
+--- response_headers
+!X-Derived-Address
 
 === TEST 11: Module enabled, custom header configured, XFF and custom header provided
 --- config
 location = /t {
   address_parser on;
+  add_header X-Derived-Address $derived_address;
   address_parser_custom_header "X-Parser-Test-IP";
   echo 'test';
 }

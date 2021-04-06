@@ -6,15 +6,9 @@
 
 #include "ngx_http_address_parser_module.h"
 
-ngx_module_t ngx_http_address_parser_module;
+ngx_str_t derived_address_variable_name = ngx_string("derived_address");
 
-static void set_derived_address_header(ngx_http_request_t *r, ngx_str_t *address) {
-  ngx_table_elt_t *h;
-  h = ngx_list_push(&r->headers_out.headers);
-  h->hash = 1;
-  ngx_str_set(&h->key, "X-Derived-Address");
-  h->value = *address;
-}
+ngx_module_t ngx_http_address_parser_module;
 
 static address_status validate_address(ngx_str_t *address) {
   char terminated_comparator[INET6_ADDRSTRLEN] = {'\0'};
@@ -103,26 +97,7 @@ static ngx_int_t ngx_http_address_parser_module_handler(ngx_http_request_t *r) {
     return NGX_DECLINED;
   }
 
-  ngx_http_address_parser_module_loc_conf_t *loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_address_parser_module);
-
-  if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
-    return NGX_DECLINED;
-  }
-
-  ngx_str_t address = ngx_null_string;
-  address_status status = derive_address(r, loc_conf, &address);
-  switch (status) {
-    case ADDRESS_OK:
-      set_derived_address_header(r, &address);
-      return NGX_OK;
-    case ADDRESS_UNKNOWN:
-      set_derived_address_header(r, &r->connection->addr_text);
-      return NGX_OK;
-    case ADDRESS_INVALID:
-      return NGX_HTTP_BAD_REQUEST;
-    default:
-      return NGX_OK;
-  }
+  return NGX_OK;
 }
 
 static ngx_int_t ngx_http_address_parser_module_init(ngx_conf_t *cf) {
@@ -184,8 +159,45 @@ static char* ngx_http_address_parser_module_merge_loc_conf(ngx_conf_t *cf, void 
   return NGX_CONF_OK;
 }
 
+static ngx_int_t derived_address_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
+  ngx_http_address_parser_module_loc_conf_t *loc_conf = ngx_http_get_module_loc_conf(r, ngx_http_address_parser_module);
+
+  if (!loc_conf->enabled || loc_conf->enabled == NGX_CONF_UNSET) {
+    return NGX_OK;
+  }
+
+  ngx_str_t address = ngx_null_string;
+  address_status status = derive_address(r, loc_conf, &address);
+  switch (status) {
+    case ADDRESS_OK:
+      v->len = address.len;
+      v->valid = 1;
+      v->no_cacheable = 0;
+      v->not_found = 0;
+      v->data = address.data;
+      return NGX_OK;
+    case ADDRESS_UNKNOWN:
+    case ADDRESS_INVALID:
+    default:
+      return NGX_OK;
+  }
+}
+
+static ngx_int_t ngx_http_address_parser_module_add_variables(ngx_conf_t *cf) {
+  ngx_http_variable_t *var = ngx_http_add_variable(cf, &derived_address_variable_name, NGX_HTTP_VAR_NOCACHEABLE);
+  
+  if (var == NULL) {
+    return NGX_ERROR;
+  }
+  
+  var->get_handler = derived_address_variable;
+  var->data = 0;
+
+  return NGX_OK;
+}
+
 static ngx_http_module_t ngx_http_address_parser_module_ctx = {
-  NULL,                                           /* preconfiguration */
+  ngx_http_address_parser_module_add_variables,   /* preconfiguration */
   ngx_http_address_parser_module_init,            /* postconfiguration */
   NULL,                                           /* create main configuration */
   NULL,                                           /* init main configuration */
